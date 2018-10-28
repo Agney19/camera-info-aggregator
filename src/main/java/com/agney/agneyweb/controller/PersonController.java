@@ -3,9 +3,10 @@ package com.agney.agneyweb.controller;
 import com.agney.agneyweb.dto.PersonDto;
 import com.agney.agneyweb.service.PersonService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 
-@RestController
+@Controller
 public class PersonController {
     @Autowired
     PersonService personService;
@@ -27,6 +28,6 @@ public class PersonController {
 
     @GetMapping(value = "test")
     public String test() {
-        return "hi there!";
+        return "hi there everyone!";
     }
 }
