@@ -1,10 +1,9 @@
 package com.agney.agneyweb.service;
 
-import com.agney.agneyweb.constant.UrlType;
-import com.agney.agneyweb.dto.CameraAggregateDataDto;
-import com.agney.agneyweb.dto.CameraGeneralInfoDto;
-import com.agney.agneyweb.dto.CameraSourceDataDto;
-import com.agney.agneyweb.model.CameraDataResponse;
+import com.agney.agneyweb.dto.CameraAggregateDataOutDto;
+import com.agney.agneyweb.dto.CameraGeneralInfoInDto;
+import com.agney.agneyweb.dto.CameraSourceDataInDto;
+import com.agney.agneyweb.dto.CameraTokenDataInDto;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
 import lombok.ToString;
@@ -14,24 +13,20 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.util.Assert;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collector;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
 public class CameraService {
     private final Logger logger = LoggerFactory.getLogger(CameraService.class);
+    private final static int THREAD_COUNT = 10;
 
     private HttpClient httpClient = HttpClientBuilder.create().build();
     private ObjectMapper objectMapper = new ObjectMapper();
@@ -43,15 +38,15 @@ public class CameraService {
     @Value("${camera.future.timeout.aggregate}")
     private Long cameraAggregateTimeout;
 
-    int threadCount;
-    ExecutorService service;
-    ScheduledExecutorService scheduler;
+    private ExecutorService service;
+    private ScheduledExecutorService scheduler;
 
-    public List<CameraAggregateDataDto> getInfoAggregate() {
+    /** Получить агрегированную информацию по камерам */
+    public List<CameraAggregateDataOutDto> getInfoAggregate() {
 
-        threadCount = /*Runtime.getRuntime().availableProcessors();*/10;//TODO
-        service = Executors.newFixedThreadPool(threadCount);
-        scheduler = Executors.newScheduledThreadPool(threadCount);
+        long start = System.currentTimeMillis();
+        service = Executors.newFixedThreadPool(THREAD_COUNT);
+        scheduler = Executors.newScheduledThreadPool(THREAD_COUNT);
 
         try {
             HttpResponse response = httpClient.execute(new HttpGet(cameraInfoUrl));
@@ -60,130 +55,101 @@ public class CameraService {
                 throw new ResponseStatusException(HttpStatus.valueOf(responseCode),
                         String.format("Error response status from service. Code: %s", responseCode));
             }
-            Stream<CameraGeneralInfoDto> stream = Arrays.stream(objectMapper.readValue(response.getEntity().getContent(), CameraGeneralInfoDto[].class));
-//
-//            List<CameraAggregateDataDto> list = stream
-//              .map(c -> service.submit(new CameraUrlRequest(c.getSourceDataUrl())))
-//              .map(c -> {
-//                  try {
-//                      return c.get(cameraTimeout, TimeUnit.MILLISECONDS);
-//                  } catch (Exception e) {
-//                      logger.warn("Obtaining value from future failed!");
-//                      CameraDataResponse a = new CameraSourceDataDto(UrlType.LIVE, "asd");
-//                      return Optional.of(a);
-//                  }
-//              })
-//              .filter(Optional::isPresent)
-//              .map(c -> new CameraAggregateDataDto(14L, (CameraSourceDataDto)c.get(), null))
-//              .collect(Collectors.toList());
+            Stream<CameraGeneralInfoInDto> stream = Arrays.stream(objectMapper.readValue(response.getEntity().getContent(), CameraGeneralInfoInDto[].class));
 
-            List<CameraSourceDataDto> l = new ArrayList<>();
-
-
+            List<CameraAggregateDataOutDto> l = new ArrayList<>();
             CompletableFuture.allOf(
-                    stream.map(c -> {
+                stream.map(c -> {
 
-                        ScheduledFuture<Optional<CameraSourceDataDto>> timeoutF = scheduler.schedule(new CameraUrlStubRequest(), cameraSingleTimeout, TimeUnit.MILLISECONDS);
-                        CompletableFuture<Optional<CameraSourceDataDto>> f1 = CompletableFuture.supplyAsync(() -> {
-                            try {
-                                return timeoutF.get();
-                            } catch (Exception e) {
-                                throw new RuntimeException();
-                            }
+                    CameraAggregateDataOutDto.CameraAggregateDataDtoBuilder builder = CameraAggregateDataOutDto.builder();
+
+                    CompletableFuture<Optional<CameraSourceDataInDto>> sourceFuture = executeWithTimeout(
+                        CompletableFuture.supplyAsync(() -> new CameraUrlRequest<>(c.getSourceDataUrl(), CameraSourceDataInDto.class).call(), service),
+                        Optional.empty(),
+                        cameraSingleTimeout
+                    );
+                    sourceFuture.thenApply(opt -> {
+                        opt.ifPresent(r -> {
+                            builder.urlType(r.getUrlType());
+                            builder.videoUrl(r.getVideoUrl());
                         });
+                        return opt;
+                    });
 
-                        CompletableFuture<Optional<CameraSourceDataDto>> f0 = CompletableFuture.supplyAsync(
-                                () -> new CameraUrlRequest(c.getSourceDataUrl()).call(), service
-                        );
-
-                        return CompletableFuture.anyOf(f0, f1).thenApply(r -> {
-                            ((Optional<CameraSourceDataDto>)r).ifPresent(l::add);
-                            return r;
+                    CompletableFuture<Optional<CameraTokenDataInDto>> tokenFuture = executeWithTimeout(
+                        CompletableFuture.supplyAsync(() -> new CameraUrlRequest<>(c.getTokenDataUrl(), CameraTokenDataInDto.class).call(), service),
+                        Optional.empty(),
+                        cameraSingleTimeout
+                    );
+                    tokenFuture.thenApply(opt -> {
+                        opt.ifPresent(r -> {
+                            builder.value(r.getValue());
+                            builder.ttl(r.getTtl());
                         });
+                        return opt;
+                    });
 
-                    }).toArray(CompletableFuture[]::new)
+                    return CompletableFuture
+                            .allOf(sourceFuture, tokenFuture)
+                            .thenRun(() -> l.add(builder.id(c.getId()).build()));
+
+                }).toArray(CompletableFuture[]::new)
             ).get(cameraAggregateTimeout, TimeUnit.MILLISECONDS);
-            /*(() -> l.stream()
-                    .filter(Optional::isPresent)
-                    .map(d -> new CameraAggregateDataDto(14L, (CameraSourceDataDto) d.get(), null))
-                    .collect(Collectors.toList())
-            ).get(2000, TimeUnit.MILLISECONDS)*/
-            ;
 
-//            Thread.sleep(2000);
-//            System.out.println(a.get());
-
-//            List<CameraAggregateDataDto> b = l.stream().filter(Optional::isPresent)
-//                    .map(d -> new CameraAggregateDataDto(14L, (CameraSourceDataDto) d.get(), null))
-//                    .collect(Collectors.toList());
-
-//            System.out.println(b);
-            return l.stream()
-                    .map(a -> new CameraAggregateDataDto(123L, a, null))
-                    .collect(Collectors.toList());
-//            stream.forEach(e -> {
-//                Optional<CameraDataResponse> data = service.submit(new CameraUrlRequest(e.getSourceDataUrl())).get(cameraTimeout, TimeUnit.MILLISECONDS);
-//            });
-
+            logger.info(String.format("Camera data aggregated in %s ms", System.currentTimeMillis() - start));
+            return l;
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    public <A> CompletableFuture<A> executeWithTimeout(Future<A> f, Long timeout) {
-        ScheduledFuture<Optional<CameraSourceDataDto>> timeoutF = scheduler.schedule(new CameraUrlStubRequest(), cameraSingleTimeout, TimeUnit.MILLISECONDS);
-        CompletableFuture<Optional<CameraSourceDataDto>> f1 = CompletableFuture.supplyAsync(() -> {
+    /**
+     * Возвращает {@link CompletableFuture} в зависимости от времени выполнения {@param future}
+     * @param future      Future для выполнения за {@param timeout}
+     * @param backupValue Значение в случае невыполнения {@param future}
+     * @param timeout     Время ожидания {@param future}
+     */
+    @SuppressWarnings("unchecked")
+    private <A> CompletableFuture<A> executeWithTimeout(CompletableFuture<A> future, A backupValue, Long timeout) {
+        ScheduledFuture<A> timeoutF = scheduler.schedule(
+                () -> backupValue, timeout, TimeUnit.MILLISECONDS
+        );
+        CompletableFuture<A> timeoutFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return timeoutF.get();
             } catch (Exception e) {
                 throw new RuntimeException();
             }
         });
-
-        CompletableFuture<Optional<CameraSourceDataDto>> f0 = CompletableFuture.supplyAsync(
-                () -> new CameraUrlRequest(c.getSourceDataUrl()).call(), service
-        );
+        return (CompletableFuture<A>)CompletableFuture.anyOf(future, timeoutFuture);
     }
 
     @Getter
     @ToString
-    public class CameraUrlRequest implements Callable<Optional<CameraSourceDataDto>> {
+    public class CameraUrlRequest<A> implements Callable<Optional<A>> {
         private final String url;
+        private final Class<A> clazz;
 
-        public CameraUrlRequest(String url) {
+        CameraUrlRequest(String url, Class<A> clazz) {
             this.url = url;
+            this.clazz = clazz;
         }
 
         @Override
-        public Optional<CameraSourceDataDto> call() {
+        public Optional<A> call() {
             try {
-                // TODO: для пороверки, что фьючи выполняются параллельно
-                System.out.println(url + " start");
-
                 final HttpResponse response = HttpClientBuilder.create().build().execute(new HttpGet(url));
                 int responseCode = response.getStatusLine().getStatusCode();
                 if (responseCode != HttpStatus.OK.value()) {
                     throw new ResponseStatusException(HttpStatus.valueOf(responseCode),
                             String.format("Error response status from service. Code: %s", responseCode));
                 }
-                final CameraSourceDataDto data = objectMapper.readValue(response.getEntity().getContent(), CameraSourceDataDto.class);
-                System.out.println(url + " finish; data: " + data);
+                final A data = objectMapper.readValue(response.getEntity().getContent(), clazz);
                 return Optional.of(data);
             } catch (IOException | ResponseStatusException e) {
                 logger.warn("Url request error: " + e.getMessage());
-                System.out.println(url + " finish");
                 return Optional.empty();
             }
-        }
-    }
-
-    @Getter
-    @ToString
-    public class CameraUrlStubRequest implements Callable<Optional<CameraSourceDataDto>> {
-
-        @Override
-        public Optional<CameraSourceDataDto> call() {
-            return Optional.of(new CameraSourceDataDto(UrlType.LIVE, "empty"));
         }
     }
 }

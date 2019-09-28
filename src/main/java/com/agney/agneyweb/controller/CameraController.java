@@ -1,6 +1,6 @@
 package com.agney.agneyweb.controller;
 
-import com.agney.agneyweb.dto.CameraAggregateDataDto;
+import com.agney.agneyweb.dto.CameraAggregateDataOutDto;
 import com.agney.agneyweb.service.CameraService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
@@ -12,8 +12,9 @@ public class CameraController {
     @Autowired
     CameraService cameraService;
 
-    @GetMapping(value = "camera/aggregate")
-    public List<CameraAggregateDataDto> getInfoAggregate() {
+    /** Получить агрегированную информацию по камерам */
+    @GetMapping(value = "camera/info/aggregate")
+    public List<CameraAggregateDataOutDto> getInfoAggregate() {
         return cameraService.getInfoAggregate();
     }
 }

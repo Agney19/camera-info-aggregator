@@ -9,15 +9,15 @@ import org.springframework.util.Assert;
 
 @Getter
 @ToString
-public class CameraGeneralInfoDto {
+public class CameraGeneralInfoInDto {
     private final Long   id;
     private final String sourceDataUrl;
     private final String tokenDataUrl;
 
     @JsonCreator
-    public CameraGeneralInfoDto(@JsonProperty("id")            Long   id,
-                                @JsonProperty("sourceDataUrl") String sourceDataUrl,
-                                @JsonProperty("tokenDataUrl")  String tokenDataUrl) {
+    public CameraGeneralInfoInDto(@JsonProperty("id")            Long   id,
+                                  @JsonProperty("sourceDataUrl") String sourceDataUrl,
+                                  @JsonProperty("tokenDataUrl")  String tokenDataUrl) {
         this.id            = id;
         this.sourceDataUrl = sourceDataUrl;
         this.tokenDataUrl  = tokenDataUrl;
