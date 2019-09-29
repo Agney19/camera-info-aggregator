@@ -4,32 +4,31 @@ import com.agney.agneyweb.dto.CameraAggregateDataOutDto;
 import com.agney.agneyweb.dto.CameraGeneralInfoInDto;
 import com.agney.agneyweb.dto.CameraSourceDataInDto;
 import com.agney.agneyweb.dto.CameraTokenDataInDto;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.agney.agneyweb.http.HttpClient;
 import lombok.Getter;
 import lombok.ToString;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.HttpClient;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.HttpClientBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.util.Assert;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Stream;
 
 @Service
 public class CameraService {
     private final Logger logger = LoggerFactory.getLogger(CameraService.class);
     private final static int THREAD_COUNT = 10;
 
-    private HttpClient httpClient = HttpClientBuilder.create().build();
-    private ObjectMapper objectMapper = new ObjectMapper();
+    private ExecutorService service;
+    private ScheduledExecutorService scheduler;
+
+    @Autowired
+    private HttpClient httpClient;
 
     @Value("${camera.info.url}")
     private String cameraInfoUrl;
@@ -37,9 +36,6 @@ public class CameraService {
     private Long cameraSingleTimeout;
     @Value("${camera.future.timeout.aggregate}")
     private Long cameraAggregateTimeout;
-
-    private ExecutorService service;
-    private ScheduledExecutorService scheduler;
 
     /** Получить агрегированную информацию по камерам */
     public List<CameraAggregateDataOutDto> getInfoAggregate() {
@@ -49,19 +45,13 @@ public class CameraService {
         scheduler = Executors.newScheduledThreadPool(THREAD_COUNT);
 
         try {
-            HttpResponse response = httpClient.execute(new HttpGet(cameraInfoUrl));
-            int responseCode = response.getStatusLine().getStatusCode();
-            if (responseCode != HttpStatus.OK.value()) {
-                throw new ResponseStatusException(HttpStatus.valueOf(responseCode),
-                        String.format("Error response status from service. Code: %s", responseCode));
-            }
-            Stream<CameraGeneralInfoInDto> stream = Arrays.stream(objectMapper.readValue(response.getEntity().getContent(), CameraGeneralInfoInDto[].class));
+            List<CameraGeneralInfoInDto> generalInfoes = Arrays.asList(httpClient.executeGetRequest(cameraInfoUrl, CameraGeneralInfoInDto[].class));
+            List<CameraAggregateDataOutDto> list = new ArrayList<>(generalInfoes.size());
 
-            List<CameraAggregateDataOutDto> l = new ArrayList<>();
             CompletableFuture.allOf(
-                stream.map(c -> {
+                generalInfoes.stream().map(c -> {
 
-                    CameraAggregateDataOutDto.CameraAggregateDataDtoBuilder builder = CameraAggregateDataOutDto.builder();
+                    CameraAggregateDataOutDto.CameraAggregateDataOutDtoBuilder builder = CameraAggregateDataOutDto.builder();
 
                     CompletableFuture<Optional<CameraSourceDataInDto>> sourceFuture = executeWithTimeout(
                         CompletableFuture.supplyAsync(() -> new CameraUrlRequest<>(c.getSourceDataUrl(), CameraSourceDataInDto.class).call(), service),
@@ -91,13 +81,13 @@ public class CameraService {
 
                     return CompletableFuture
                             .allOf(sourceFuture, tokenFuture)
-                            .thenRun(() -> l.add(builder.id(c.getId()).build()));
+                            .thenRun(() -> list.add(builder.id(c.getId()).build()));
 
                 }).toArray(CompletableFuture[]::new)
             ).get(cameraAggregateTimeout, TimeUnit.MILLISECONDS);
 
             logger.info(String.format("Camera data aggregated in %s ms", System.currentTimeMillis() - start));
-            return l;
+            return list;
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -131,6 +121,9 @@ public class CameraService {
         private final Class<A> clazz;
 
         CameraUrlRequest(String url, Class<A> clazz) {
+            Assert.notNull(url, "url is null");
+            Assert.notNull(clazz, "clazz is null");
+
             this.url = url;
             this.clazz = clazz;
         }
@@ -138,14 +131,7 @@ public class CameraService {
         @Override
         public Optional<A> call() {
             try {
-                final HttpResponse response = HttpClientBuilder.create().build().execute(new HttpGet(url));
-                int responseCode = response.getStatusLine().getStatusCode();
-                if (responseCode != HttpStatus.OK.value()) {
-                    throw new ResponseStatusException(HttpStatus.valueOf(responseCode),
-                            String.format("Error response status from service. Code: %s", responseCode));
-                }
-                final A data = objectMapper.readValue(response.getEntity().getContent(), clazz);
-                return Optional.of(data);
+                return Optional.of(httpClient.executeGetRequest(url, clazz));
             } catch (IOException | ResponseStatusException e) {
                 logger.warn("Url request error: " + e.getMessage());
                 return Optional.empty();
